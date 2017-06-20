@@ -1,0 +1,1128 @@
+#Lab Guide
+
+Legend:
+
+Green text represents interactive sessions.
+Blue text represents file content.
+
+##Chapter 1
+
+###Use Twisted!
+
+####Set up the dev environment
+
+The students should set up their development environment.
+
+$ virtualenv twisted-env
+New python executable in twisted-env/bin/python
+Installing distribute.........done.
+Installing pip................done.
+$ cd twisted-env
+$ . bin/activate
+(twisted-env)$
+
+Then install Twisted with the following command:
+
+(twisted-env)$ pip install twisted
+
+Twisted should be downloaded, compiled, and installed.
+
+#### Run Twisted!
+
+Let's get an idea of what Twisted can do. First let's run a part of the test suite:
+
+(twisted-env)$ trial twisted.test
+
+You should see a lot of test names with green [OK] or blue [SKIP] and [TODO] tags go by. On a fast machine, this should take about 30 seconds. At the end there should be a line like the following:
+
+PASSED (skips=120, expectedFailures=4, successes=1953)
+
+twistd is a program used to start Twisted-based services. Let's see some of the things it can do.
+
+(twisted-env)$ twistd --help
+
+You should see several command-line arguments, as well as a list of "plugins" that can be run. These plugins represent different protocol servers that Twisted has built-in support for. We'll run a simple static-file web server.
+
+(twisted-env)$ twistd -n web --path . --port 8080
+2013-10-08 11:13:22-0700 [-] Log opened.
+2013-10-08 11:13:22-0700 [-] twistd 13.1.0 (/home/radix/twisted-env/bin/python 2.7.4) starting up.
+2013-10-08 11:13:22-0700 [-] reactor class: twisted.internet.epollreactor.EPollReactor.
+2013-10-08 11:13:22-0700 [-] Site starting on 8080
+2013-10-08 11:13:22-0700 [-] Starting factory <twisted.web.server.Site instance at 0x7f6d56fcfcf8>
+
+You should be able to visit http://localhost:8080/ with your web browser and see a file listing of your virtual environment.
+
+You can type Ctrl-C in your terminal to stop the web server.
+
+#### Write a custom Twisted deployment
+
+Another way to run custom Twisted-based software is by writing and running a .tac file with twistd. .tac files are just Python files that follow a particular convention which we will go into later in the course. For now just copy and paste the following code into a file named my-server.tac, in your twisted-env directory:
+
+from twisted.application.service import Application, Service
+from twisted.application.internet import TCPServer
+from twisted.web import server, static, resource 
+
+application = Application("my-server")
+root_resource = resource.Resource()
+data_resource = static.Data(
+   "<html><body><em>Hello, world!</em></body></html>",
+   "text/html")
+root_resource.putChild("", data_resource)
+site = server.Site(root_resource)
+web_service = TCPServer(8080, site)
+web_service.setServiceParent(application)
+
+Now you should be able to run the following command:
+
+(twisted-env)$ twistd -ny my-server.tac
+
+And if you visit http://localhost:8080/ in your web browser, you should see the italicized text "Hello, world!".
+
+You can type Ctrl-C in your terminal to stop the web server.
+
+This concludes the first lab!
+
+## Chapter 2 - Ersid
+
+Ersid is in-development at http://github.com/therve/ersid
+
+First install the dependencies needed by the project:
+
+(twisted-env)$ pip install klein pycrypto pyasn1
+
+We'll start with a simple ReST endpoint using klein. You can learn more about it here: https://github.com/twisted/klein
+
+(twisted-env)$ mkdir ersid-project
+
+(twisted-env)$ cd ersid-project
+
+(twisted-env)$ mkdir bin ersid
+
+(twisted-env)$ touch ersid/__init__.py
+
+Create the service in ersid/rest.py:
+
+from klein import Klein
+
+class Service(object):
+   app = Klein()
+
+   def __init__(self):
+       self.storage = {}
+
+   @app.route('/<key>', methods=['POST'])
+   def set_key(self, request, key):
+       self.storage[key] = request.content.getvalue()
+
+   @app.route('/<key>', methods=['GET'])
+   def get_key(self, request, key):
+       return self.storage[key]
+
+Then create the script in bin/service:
+
+#!/usr/bin/env python
+
+from ersid import rest
+
+service = rest.Service()
+
+service.app.run('localhost', 8080)
+
+Then run it:
+
+(twisted-env)$ chmod a+x ./bin/service
+
+(twisted-env)$ PYTHONPATH=. ./bin/service
+2013-10-09 09:53:18-0700 [-] Log opened.
+2013-10-09 09:53:18-0700 [-] Site starting on 8080
+2013-10-09 09:53:18-0700 [-] Starting factory <twisted.web.server.Site instance at 0xab5ab2c>
+
+We can test the service using curl in another terminal:
+
+$ curl -X POST -d myvalue http://localhost:8080/mykey
+
+$ curl http://localhost:8080/mykey
+myvalue
+
+We have a storage service! Now let's fix a bug:
+
+$ curl http://localhost:8080/another_key
+<...error...>
+
+We need to handle non existing key in the service. Let's change the get_key method:
+
+   @app.route('/<key>', methods=['GET'])
+   def get_key(self, request, key):
+       if key in self.storage:
+           return self.storage[key]
+       request.setResponseCode(404)
+       return 'Not found'
+
+Restart the service and try again:
+
+$ curl -f http://localhost:8080/another_key
+curl: (22) The requested URL returned error: 404 Not Found
+
+One less bug!
+
+Let's now introduce manhole into our project. It's going to be heavily inspired from http://twistedmatrix.com/documents/current/conch/examples/demo_manhole.tac but simplified for our use case, and not using telnet.
+
+Create a file named ersid/backdoor.py with the following content:
+
+from twisted.conch.insults import insults
+
+from twisted.conch.manhole import ColoredManhole
+from twisted.conch.manhole_ssh import ConchFactory, TerminalRealm
+
+from twisted.cred import checkers, portal
+
+def makeFactory(namespace):
+   checker = checkers.InMemoryUsernamePasswordDatabaseDontUse(
+       username='password')
+
+   def chainProtocolFactory():
+       return insults.ServerProtocol(ColoredManhole, namespace)
+
+   rlm = TerminalRealm()
+   rlm.chainedProtocolFactory = chainProtocolFactory
+   ptl = portal.Portal(rlm, [checker])
+   return ConchFactory(ptl)
+And change bin/service to enable it:
+
+#!/usr/bin/env python
+
+from twisted.internet import reactor
+
+from ersid import backdoor, rest
+
+service = rest.Service()
+reactor.listenTCP(8022, backdoor.makeFactory({'service': service}))
+   
+service.app.run('localhost', 8080)
+
+We've added a new TCP factory listening on 8022. Try connecting to it:
+
+$ ssh -p 8022 username@localhost
+<enter 'password'>
+
+>>> print service
+<ersid.rest.Service object at 0x90bfa0c>
+>>> service.storage
+{}
+
+Now set a value using curl:
+
+$ curl -X POST -d myvalue http://localhost:8080/mykey
+
+And check that the value was set in the service:
+
+>>> service.storage
+{u'mykey': 'myvalue'}
+
+We can also modify values:
+
+>>> service.storage['mykey'] = 'another_string'
+
+Let's access it:
+
+$ curl http://localhost:8080/mykey
+another_value
+
+Let's now introduce scheduled events. To do so, we'll create a looping call which will dump the stored elements at fixed intervals for backup. http://twistedmatrix.com/documents/13.1.0/api/twisted.internet.task.LoopingCall.html documents the API we'll be using. There is some usage documentation at http://twistedmatrix.com/documents/current/core/howto/time.html too.
+Create a file called ersid/dump.py with the following content:
+
+import json
+
+from twisted.internet.task import LoopingCall
+
+def backup(service, filename):
+   out = file(filename, 'w')
+   out.write(json.dumps(service.storage))
+   out.close()
+
+
+def startLoop(interval, service, filename):
+   loop = LoopingCall(backup, service, filename)
+   loop.start(interval)
+
+And change bin/service accordingly:
+
+#!/usr/bin/env python
+
+from twisted.internet import reactor
+
+from ersid import backdoor, rest, dump
+
+service = rest.Service()
+reactor.listenTCP(8022, backdoor.makeFactory({'service': service}))
+dump.startLoop(10, service, '/tmp/dump')
+
+service.app.run('localhost', 8080)
+
+Set a key using curl as before, then wait for a little bit for the interval to pass. You should be able to see the value in the dump file:
+
+$ cat /tmp/dump
+{"mykey": "myvalue"}
+
+## Chapter 3 - Deferreds
+
+### 3.1 Basic callbacks 
+
+(twisted-env)$ python
+>>> from twisted.internet.defer import Deferred
+>>> result = Deferred()
+>>> def gotResult(result):
+...     print "success:", result
+... 
+>>> result.addCallback(gotResult)
+<Deferred at 0xff2248>
+>>> #Later on...
+... 
+>>> result.callback("Hello, world!")
+success: Hello, world!
+
+It's important to note that result.callback didn't return the "success: Hello, world!" string, but rather it was printed to the terminal in the gotResult() function. This shows that the callbacks are executed immediately when the result is made available.
+
+### 3.2 adding callback after result is available
+
+>>> from twisted.internet.defer import Deferred
+>>> result = Deferred()
+>>> result.callback("Hello, world!")
+>>> def gotResult(result):
+...     print "success:", result
+... 
+>>> result.addCallback(gotResult)
+success: Hello, world!
+<Deferred at 0xff2248>
+
+We see that it doesn't matter for the callback whether we add it after the result is already there: the Deferred will immediately fire the callback when it's added if it has a result.
+
+### 3.3 Basic error handling
+
+>>> result = Deferred()
+>>> def gotResult(result):
+...     print "success:", result
+... 
+>>> def gotError(failure):
+...     print "failure!", failure
+... 
+>>> result.addCallback(gotResult)
+>>> result.addErrback(gotError)
+>>> # Later on...
+... 
+>>> result.errback(Exception("Oh no!"))
+failure! [Failure instance: Traceback (failure with no frames): <type 'exceptions.Exception'>: Oh no!
+]
+
+Notice that the "gotResult" function was not invoked, even though it was registered as a callback -- when a Deferred fails, it skips the callbacks and goes straight to the next errback in the chain.
+
+### 3.4 Callback chains
+
+>>> import re
+>>> result = Deferred()
+>>> def gotHTML(html):
+...     return re.search("\d+", html).group(0)
+... 
+>>> def gotNumber(number):
+...     print "The number is:", number
+... 
+>>> result.addCallback(gotHTML).addCallback(gotNumber)
+<Deferred at 0xff27a0>
+>>> result.callback("<html><body>Number data: 50210</body></html>")
+The number is: 50210
+
+### 3.5 Error handling
+
+A useful pattern is to handle an error such that the success chain can continue on. For example, consider the following workflow:
+
+- retrieve data from the database
+- render the result as an HTML table
+- wrap the HTML table in a template
+- send the result to the client
+
+Each step can be represented as an additional chained callback, but consider that we'll want to handle errors from the database (say the connection is lost or the data is otherwise unavailable). The behavior of Deferred chains allows us to "correct" the error from the database, and continue on to the callbacks that wrap the table in a template and send the result to the client.
+
+We'll gloss over the "retrieve from the database" and "send the result to the client" -- we'll provide the data ourselves in this example, and pretend that the print function is what sends the result to the client. The intermediate functions are otherwise identical.
+
+>>> def renderDataRow(row):
+...     return "<table><td>{row}</td></table>".format(row=row)
+... 
+>>> def renderError(failure):
+...     message = failure.getErrorMessage()
+...     return "<strong>ERROR: {message}".format(message=message)
+... 
+>>> def wrapInTemplate(snippet):
+...     return "<html><body>A result will follow! {result}</body></html>".format(
+...         result=snippet)
+... 
+>>> def sendToClient(html):
+...     print html
+... 
+>>> result = Deferred()
+>>> result.addCallback(renderDataRow)
+>>> result.addErrback(renderError)
+>>> result.addCallback(wrapInTemplate)
+>>> result.addCallback(sendToClient)
+>>> result.callback("name=chris occupation=programmer")
+<html><body>A result will follow! <table><td>name=chris occupation=programmer</td></table></body></html>
+>>> result.addCallback(renderDataRow)
+
+Now to show the error behavior:
+
+>>> result.addErrback(renderError)
+>>> result.addCallback(wrapInTemplate)
+>>> result.addCallback(sendToClient)
+>>> result.errback(Exception("CONNECTION LOST"))
+<html><body>A result will follow! <strong>ERROR: CONNECTION LOST</body></html>
+
+### 3.6 gatherResults
+
+>>> from twisted.internet.defer import gatherResults
+>>> def gotResult(result):
+...     print "success:", result
+... 
+>>> first = Deferred()
+>>> second = Deferred()
+>>> total = gatherResults([first, second])
+>>> total.addCallback(gotResult)
+<DeferredList at 0xff27a2>
+>>> first.callback('Hello')
+>>> second.callback('World')
+success: ['Hello', 'World']
+
+As soon as both results are available, the Deferred created by gatherResults fires and its callback gets called with the list of results.
+
+>>> def gotResult(result):
+...     print "success:", result
+... 
+>>> def gotError(result):
+...     print "failure!", result
+... 
+>>> first = Deferred()
+>>> second = Deferred()
+>>> total = gatherResults([first, second])
+>>> total.addCallback(gotResult).addErrback(gotError)
+<DeferredList at 0xff27a2>
+>>> first.callback('Hello')
+>>> second.errback(Exception('Oh noes')
+failure! [Failure instance: Traceback (failure with no frames): <class 'twisted.internet.defer.FirstError'>: FirstError[#1, [Failure instance: Traceback (failure with no frames): <type 'exceptions.Exception>: Oh noes
+
+By default, gatherResults fires the errback once one of the Deferred failed. You can use DeferredList if you want different behavior.
+
+## Chapter 4
+
+### Twisted Trial
+
+#### Run the previous test with the default unittest runner
+
+(This code should have been downloaded or otherwise provided as tests/test_fractions_success.py)
+
+import unittest
+from fractions import Fraction
+
+class TestSuccess(unittest.TestCase):
+
+   def test_add_positive(self):
+       self.assertEqual(Fraction(19, 12),
+                        Fraction(3, 4) + Fraction(5, 6))
+
+   def test_add_negative(self):
+       self.assertEqual(Fraction(-19, 12),
+                        Fraction(-3, 4) + Fraction(-5, 6))
+
+   def test_add_zero(self):
+       self.assertEqual(Fraction(1, 2),
+                        Fraction(0, 1) + Fraction(1, 2))
+
+if __name__ == '__main__':
+   unittest.main()
+
+(twisted-env)$ python tests/test_fractions_success.py
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+OK
+
+The all three test methods passed, which is what each of those periods mean.
+
+#### Run the previous test with the trial test runner
+
+(twisted-env)$ trial tests/test_fractions_success.py
+test_fractions_success
+ TestSuccess
+   test_add_negative ...                                                 [OK]
+   test_add_positive ...                                                 [OK]
+   test_add_zero ...                                                     [OK]
+
+------------------------------------------------------------------------------
+Ran 3 tests in 0.026s
+
+PASSED (successes=3)
+
+All three tests passed, but this time there is more helpful output stating which tests in which TestCase in which module ran, and that all 3 passed.  Let's check the directory now.
+
+(twisted-env)$ ls
+_trial_temp  test
+
+(twisted-env)$ ls _trial_temp/
+_trial_marker  test.log
+
+The _trial_temp directory contains extra information that may be pertinent to the test run.  If your tests needed to create temporary directories, for instance, or write to temporary files, if you used trial's API the temporary directories and files created by each test would be in _trial_temp.
+
+If the code produced any log, they would appear in _trial_temp/test.log.
+
+#### Trial's test discovery
+
+Trial can also find all tests associated with your package.
+
+Let's turn this into a package and add some more tests.
+(twisted-env)$ mkdir usetrial
+(twisted-env)$ touch usetrial/__init__.py
+(twisted-env)$ mv test usetrial
+(twisted-env)$ touch usetrial/test/__init__.py
+
+(This should be downloaded as usetrial/test/test_stubbing.py)
+import unittest
+from fractions import Fraction
+
+class TestFractionMethodCalled(unittest.TestCase):
+
+   def setUp(self):
+       self.counter = 0
+
+       def called(*args, **kwargs):
+           self.counter += 1
+
+       Fraction.__add__ = called
+
+   def test_add_calls_fraction_add(self):
+       """
+       Adding two Fractions together calls the __add__ method
+       of Fraction
+       """
+       Fraction(1, 1) + Fraction(1, 1)
+       self.assertEqual(1, self.counter)
+
+You can just specify a package, and it will run all tests it finds in the package module "test" to run.  You can see here that it will run both test_fractions_success and test_stubbing.
+
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial usetrial
+usetrial.test.test_fractions_success
+ TestSuccess
+   test_add_negative ...                                                 [OK]
+   test_add_positive ...                                                 [OK]
+   test_add_zero ...                                                     [OK]
+usetrial.test.test_stubbing
+ TestFractionMethodCalled
+   test_add_calls_fraction_add ...                                       [OK]
+
+-------------------------------------------------------------------------------
+Ran 4 tests in 0.028s
+
+You can also specify a fully-qualified module, class, or test method.
+
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial usetrial.test.test_fractions_success.TestSuccess.test_add_negative
+usetrial.test.test_fractions_success
+ TestSuccess
+   test_add_negative ...                                                 [OK]
+
+------------------------------------------------------------------------------
+Ran 1 tests in 0.051s
+
+PASSED (successes=1)
+
+Twisted also has its own unittest module, with a TestCase that provides some additional utilities for testing Deferreds, and that provide some additional utility when using trial as the test runner, as we'll see later.  It is otherwise API and behavior compatible with Python's unittest module.
+
+Please open both test files and change:
+
+      import unittest
+
+to:
+
+    from twisted.trial import unittest
+
+Explanations later.
+
+You can also delete the following from test_fractions_success:
+
+if __name__ == '__main__':
+   unittest.main()
+
+#### trial --random and trial --debug
+It's a good habit to run trial with the option --random, which runs the test in a particular order based on a random seed.  Running with the same seed will run the tests in the same order, and running the test with the seed 0 will let trial pick a random seed for you.  trial --random works with both Python's unittest.TestCase's and with trial's unittest.TestCase's.
+
+Run this several times and note the difference in the order the tests are run. You will probably also notice test failures in some cases, which we will get into in a bit.
+
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial --random 0 usetrial
+Running tests shuffled with seed <...>
+
+If you've run this enough times, you will happen upon a test run in which test_stubbing methods are run before tests_fractions_success, and suddenly there are three test failures.
+
+Please make a note of the random seed it was run with. In this case, 138126228983 cause the failure:
+
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial --random 0 usetrial
+Running tests shuffled with seed 138126228983
+
+usetrial.test.test_stubbing
+ TestSuccess
+   test_add_calls_fraction_add ...                                       [OK]
+usetrial.test.test_fractions_success
+ TestFractionMethodCalled
+   test_add_positive ...                                               [FAIL]
+   test_add_zero ...                                                   [FAIL]
+   test_add_negative ...                                               [FAIL]
+
+==============================================================================
+[FAIL]
+...
+
+What's causing these failures?  Let's see what happens when we pass the --debug option.  It first stops at a try-except loop - just hit "C" for continue.
+
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial --debug --random 138126228983 usetrial
+Running tests shuffled with seed 138126228983
+
+> .../.virtualenvs/twisted-env/lib/python2.7/site-packages/twisted/trial/runner.py(218)run()
+-> try:
+(Pdb) c
+usetrial.test.test_stubbing
+ TestFractionMethodCalled
+   test_add_calls_fraction_add ...                                        [OK]
+usetrial.test.test_fractions_success
+ TestSuccess
+   test_add_positive ... Jumping into debugger for post-mortem of exception 'not equal:
+a = Fraction(19, 12)
+b = None
+':
+> .../.virtualenvs/otter/lib/python2.7/site-packages/twisted/trial/_synctest.py(356)assertEqual()
+-> % (msg, pformat(first), pformat(second)))
+(Pdb) 
+
+As you can see, it drops into post-mortem debugging on exceptions (this does not currently work on Python unittest.TestCase's, only on trial unittest.TestCase's - this is the reason we changed the imports before).
+
+Let's play around with pdb (or pudb) a little.
+
+(Pdb) a
+self = test_add_zero (usetrial.test.test_fractions_success.TestSuccess)
+first = 1/2
+second = None
+msg = 
+
+So test_add_zero was the next test that was run, and it failed because we were expecting a Fraction(1, 2), but we instead got None from adding two fractions.  Let's see what's wrong.
+
+(Pdb) from fractions import Fraction
+(Pdb) print Fraction(1, 2) + Fraction(0, 1)
+None
+(Pdb) Fraction.__add__
+<unbound method Fraction.called>
+
+The __add__ method does not look right.  Why is __add__ a method named "called"?  It should be the defined __add__ method on Fraction in the standard library, as you can see if you drop out of the debugger (Ctrl-D repeatedly):
+
+(twisted-env)$ python
+>>> from fractions import Fraction
+>>> Fraction.__add__
+<unbound method Fraction.__add__>
+
+The reason for the failures is that test_stubbing makes a global change - it stubs out one of the methods (__add__) defined for Fraction in order to test that Fraction(...) + Fraction(...) calls the Fraction.__add__ method, and it forgot to change it back.  Now Fraction.__add__ always calls that fake method.
+
+Since the other tests add fractions together (and thus actually test that __add__ is implemented correctly), the other tests fail.
+
+Change setUp to do the following:
+
+   def setUp(self):
+       self.counter = 0
+
+       def called(*args, **kwargs):
+           self.counter += 1
+
+            self.old_add = Fraction.__add__
+       Fraction.__add__ = called
+
+And add the following tearDown function, which will restore the old function.
+
+   def tearDown(self):
+            Fraction.__add__ = self.old_add
+
+Now we run the test with that same seed that caused the errors.  This is because we want to make sure that running the tests in that specific order no longer causes errors.
+
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial --random 138126228983 usetrial
+Running tests shuffled with seed 138126228983
+
+usetrial.test.test_stubbing
+ TestSuccess
+   test_add_calls_fraction_add ...                                       [OK]
+usetrial.test.test_fractions_success
+   test_add_positive ...                                                 [OK]
+   test_add_zero ...                                                     [OK]
+   test_add_negative ...                                                 [OK]
+
+------------------------------------------------------------------------------
+Ran 4 tests in 0.037s
+
+PASSED (successes=4)
+
+It is important to always clean up after your tests, so that you do not break other tests.  And that's why --random is useful - if we didn't run the tests with --random, we would not know that the stubbing test broke other tests that depended on __add__.
+
+"What's the problem?", you might ask, since when we didn't run with --random, the tests passed anyway.  test_stubbing was run at the end, so it doesn't matter.
+
+Trial runs the test methods in alphabetical order.  What if we wanted to rename test_fractions_success of test_successfully_add_fractions?  This would mean that test_stubbing gets run first, and all of a sudden your tests would fail inexplicably.  Alternately, if you created a new test module called test_subtract_functions, and those tests depended upon add at all, those test would inexplicably fail.
+
+More dangerously, what if you were testing a function that was actually implemented incorrectly, and you stubbed out that function (or a dependency of that function) to always succeed?  When you ran your tests, you would get a false positive, which would lead you to believe that your implementation was correct.
+
+You may also be interested in the addCleanup method, which is good for incrementally cleaning up state as you modify it throughout a function.
+
+#### trial --debug --debugger
+We briefly went over debug before, and shows that it drops into a post-mortem examination of a failed test.
+
+You can also specify a particular debugger for trial.  PDB is not the only debugger available.  For instance, if you install pudb, which is a debugger with a Turbo-Pascal-style GUI, you can use that instead of PDB:
+
+(twisted-env)$ pip install pudb
+...
+(twisted-env)$ PYTHONPATH=./usetrial:$PYTHONPATH trial --debug --debugger pudb --random 138126228983 usetrial
+
+Hit "q" to quit.
+
+## Chapter 5
+
+### Chapter 5 Part 1 - .tac files
+
+Create a service.tac file with the following content:
+
+from twisted.web.server import Site                                              
+from twisted.application import service, internet                                
+
+from ersid import backdoor, rest, dump                                           
+
+svc = rest.Service()                                                             
+
+application = service.Application('Ersid application')
+
+backdoorService = internet.TCPServer(8022, backdoor.makeFactory({'service': svc}))
+backdoorService.setServiceParent(application)
+
+dumpService = internet.TimerService(10, dump.backup, svc, '/tmp/dump')
+dumpService.setServiceParent(application)
+
+restService = internet.TCPServer(8080, Site(svc.app.resource()))
+restService.setServiceParent(application)
+
+Then run it in the terminal using twistd:
+
+(twisted-env)$ twistd -ny service.tac
+
+### Chapter 5 Part 2 - twistd plugins
+
+Now let's do the same thing with plugins
+
+(twisted-env)$ mkdir -p twisted/plugins
+
+Then create the file named ersid_plugin.py with the following content:
+
+from zope.interface import implements
+
+from twisted.plugin import IPlugin
+from twisted.application import service, internet
+
+from twisted.web.server import Site
+from twisted.python.usage import Options
+
+from ersid import backdoor, rest, dump
+
+class ErsidOptions(Options):
+   optParameters = [
+       ['rest-port', 'p', 8080, 'Port of the ReST endpoint', int],
+       ['manhole-port', 'm', 8022, 'Port of the Manhole endpoint', int],
+       ['dump-interval', 'i', 10,
+        'Time interval in seconds between each dump', int],
+       ['dump-file', 'f',  '/tmp/dump', 'File used for dump'],
+   ]
+
+class ErsidPlugin(object):
+   implements(IPlugin, service.IServiceMaker)
+
+   tapname = 'ersid'
+   description = 'Ersid service plugin'
+   options = ErsidOptions
+
+   def makeService(self, options):
+       parent = service.MultiService()
+       svc = rest.Service()
+       backdoorService = internet.TCPServer(
+           options['manhole-port'], backdoor.makeFactory({'service': svc}))
+       backdoorService.setServiceParent(parent)
+
+       dumpService = internet.TimerService(
+           options['dump-interval'], dump.backup, svc, options['dump-file'])
+       dumpService.setServiceParent(parent)
+
+       restService = internet.TCPServer(
+           options['rest-port'], Site(svc.app.resource()))
+       restService.setServiceParent(parent)
+       return parent
+
+
+ersidPlugin = ErsidPlugin()
+
+Switching to a plugin allowed us to parametrize a lot of the variables we had in the script and in the TAC file. You can visualize those parameters easily:
+
+(twisted-env)$ twistd ersid --help
+Usage: twistd [options] ersid [options]
+Options:
+ -p, --rest-port=      Port of the ReST endpoint [default: 8080]
+ -m, --manhole-port=   Port of the Manhole endpoint [default: 8022]
+ -i, --dump-interval=  Time interval in seconds between each dump [default: 10]
+ -f, --dump-file=      File used for dump [default: /tmp/dump]
+     --version         Display Twisted version and exit.
+     --help            Display this help and exit.
+
+And then run the service with customized options:
+
+(twisted-env)$ twistd -n ersid --rest-port 9090 --dump-interval 5
+2013-10-09 16:41:31-0700 [-] Log opened.
+2013-10-09 16:41:31-0700 [-] twistd 12.3.0 (/usr/bin/python 2.7.4) starting up.
+2013-10-09 16:41:31-0700 [-] reactor class: twisted.internet.epollreactor.EPollReactor.
+2013-10-09 16:41:31-0700 [-] ConchFactory starting on 8022
+2013-10-09 16:41:31-0700 [-] Starting factory <twisted.conch.manhole_ssh.ConchFactory instance at 0xb681790c>
+2013-10-09 16:41:31-0700 [-] Site starting on 9090
+2013-10-09 16:41:31-0700 [-] Starting factory <twisted.web.server.Site instance at 0xb681798c>
+
+### Chapter 5 part 3 - logging
+
+Let's add some logging!
+
+We'll add a log to the storage-dumping process in Ersid. We can update the gotAll function in dump.py like so:
+
+   def gotAll(data):
+       out = file(filename, 'w')
+       dump_data = json.dumps(data)
+       out.write(json.dumps(data))
+       out.close()
+       log.msg("Dumping %s keys in %s bytes to %s" % (
+           len(data), len(dump_data), filename))
+
+Also make sure to add an import for twisted.python.log at the beginning of that file:
+
+from twisted.python import log
+
+Now when you run ersid, you should see the log output:
+
+(twisted-env)$ twistd -n ersid
+...
+2013-10-10 10:34:07-0700 [-] Dumping 0 keys in 2 bytes to /tmp/dump
+
+We can also add some error logging in case the dump procedure failed. For example, if we tell ersid to try to write its file to somewhere the user doesn't have access, the following will be logged by default, because Deferred automatically logs any unhandled exceptions:
+
+(twisted-env)$ twistd -n ersid -f /root/ueoa
+...
+2013-10-10 10:38:26-0700 [-] Unhandled Error
+    Traceback (most recent call last):
+      File ".../twisted/internet/defer.py", line 137, in maybeDeferred
+        result = f(*args, **kw)
+      File ".../ersid/dump.py", line 19, in backup
+        return d.addCallback(gotAll)
+      File ".../twisted/internet/defer.py", line 304, in addCallback
+        callbackKeywords=kw)
+      File ".../twisted/internet/defer.py", line 293, in addCallbacks
+        self._runCallbacks()
+    --- <exception caught here> ---
+      File ".../twisted/internet/defer.py", line 575, in _runCallbacks
+        current.result = callback(current.result, *args, **kw)
+      File ".../ersid/dump.py", line 12, in gotAll
+        out = file(filename, 'w')
+    exceptions.IOError: [Errno 13] Permission denied: '/root/ueoa'
+
+If we want to improve this log message, we can catch the error and log a nicer message:
+
+   def gotAll(data):
+       try:
+           out = file(filename, 'w')
+       except Exception, e:
+           log.msg("Error opening %s for write: %s" % (filename, e))
+           return
+       dump_data = json.dumps(data)
+       out.write(json.dumps(data))
+       out.close()
+       log.msg("Dumping %s keys in %s bytes to %s" % (
+           len(data), len(dump_data), filename))
+
+Now the log messages are nicer:
+
+(twisted-env)$ twistd -n ersid -f /root/ueoa
+...
+2013-10-10 10:43:43-0700 [-] Error opening /root/ueoa for write: [Errno 13] Permission denied: '/root/ueoa'
+
+## Chapter 6 - Database interaction
+
+Up to now we just store the data in memory. We want to have some persistency, and show how you can integrate Twisted with a blocking database API.
+
+First we'll add a layer of abstraction for storage. Let's create a ersid/storage.py file with the following content:
+
+from twisted.internet import defer
+
+class DictStorage(object):
+
+   def __init__(self):
+       self._storage = {}
+
+   def set(self, key, data):
+       self._storage[key] = data
+       return defer.succeed(None)
+
+   def get(self, key):
+       return defer.succeed(self._storage.get(key))
+
+   def getAll(self):
+       return defer.succeed(self._storage.copy())
+
+You can see that this mostly matches what was done in the service, except for one important part: we now return Deferreds from the various operations, to facilitate migration to the database backend.
+
+Let's modify the call sites to handle that part. The service first:
+
+class Service(object):
+   app = Klein()
+                         
+   def __init__(self, storage):
+       self.storage = storage
+                         
+   @app.route('/<key>', methods=['POST'])
+   def set_key(self, request, key):
+       return self.storage.set(key, request.content.getvalue())                                  
+
+   @app.route('/<key>', methods=['GET'])
+   def get_key(self, request, key):                
+       d = self.storage.get(key)
+                    
+       def gotKey(data):                         
+           if data is None:
+               request.setResponseCode(404)
+               return 'Not found'
+           return data    
+
+       return d.addCallback(gotKey)
+It's interesting to notice that set_key almost doesn't change, because Klein supports returning Deferred from the methods.
+
+And then the backup site:
+
+def backup(service, filename):
+   d = service.storage.getAll()
+       
+   def gotAll(data):     
+       out = file(filename, 'w')
+       out.write(json.dumps(data))
+       out.close()
+                                 
+   return d.addCallback(gotAll)
+Then slightly change the service script:
+
+from ersid import backdoor, rest, dump, storage
+
+service = rest.Service(storage.DictStorage())
+
+Alright! We can test that the service provide the same. Once done, let's now create a MySQL backend. We assume that you have a mysql database accessible with the associated credentials if necessary.
+
+We need first a simple schema in mysql_schema.sql:
+
+CREATE DATABASE ersid;
+
+USE ersid;
+
+CREATE TABLE ersid_data (
+   ersid_key VARCHAR(255) PRIMARY KEY,
+   ersid_value LONGTEXT
+);
+
+And execute it:
+$ mysql < mysql_schema.sql
+
+Then let's create a storage backend for it, in ersid/storage.py:
+
+from twisted.enterprise import adbapi
+
+class MySQLStorage(object):
+
+   def __init__(self):
+       self._pool = adbapi.ConnectionPool('MySQLdb', db='ersid')
+
+   def set(self, key, data):
+       d = self.get(key)
+
+       def gotKey(result):
+           if result:
+               return self._pool.runOperation(
+                   "UPDATE ersid_data SET ersid_value = %s WHERE "
+                   "ersid_key = %s", (data, key))
+           else:
+               return self._pool.runOperation(
+                   "INSERT INTO ersid_data VALUES (%s, %s)", (key, data))
+
+       return d.addCallback(gotKey)
+
+   def get(self, key):
+       d = self._pool.runQuery(
+           "SELECT ersid_value FROM ersid_data WHERE ersid_key = %s", (key,))
+
+       def gotValue(value):
+           if value:
+               return value[0][0]
+
+       return d.addCallback(gotValue)
+
+   def getAll(self):
+       return self._pool.runQuery(
+           "SELECT ersid_key, ersid_value FROM ersid_data")
+
+And then modify service creation:
+
+service = rest.Service(storage.MySQLStorage())
+
+
+## Chapter 7 - Client
+#### 7.1 - Using treq to make requests
+This file should either be provided to the students as use_treq.py, or the students can copy/paste this into a file.
+
+from __future__ import print_function
+import sys
+import treq
+
+def print_status(response):
+   """
+   Return print just the status code, headers, and return the response so
+   that it can be used when printing the body
+   """
+   print("Status: {0} {1}".format(response.code, response.phrase))
+   print("Headers: {0!s}".format(response.headers))
+   return response
+
+if __name__ == "__main__":
+   d = treq.get(sys.argv[1])
+   d.addCallback(print_status).addCallback(treq.content).addCallback(print)
+
+(twisted-env)$ python use_trial.py http://www.google.com
+(twisted-env)$
+
+Running this script did not print out anything.  This is because treq requires the reactor to run in order to make the HTTP connection, and get the response, etc.
+
+You can do this by using twisted.internet.task.react.  This is a function that will start the reactor, execute a single function, wait for the deferred returned by the function to fire, and then shut down.
+
+It takes as its arguments the function to execute (which must return a Deferred), and a list of arguments to pass to the function.
+
+Modify the "main" part of this code code so that it looks like:
+
+from twisted.internet.task import react
+
+def main(reactor, url):
+   d = treq.get(url)
+   d.addCallback(print_status).addCallback(treq.content).addCallback(print)
+   return d
+
+if __name__ == "__main__":
+   url = sys.argv[1]
+   react(main, [url])
+
+(twisted-env)$ python use_trial.py http://www.google.com
+Status: 200 OK
+Headers: Headers({'alternate-protocol': ['80:quic'], ...})
+<!doctype html><html itemscope=""
+...
+
+#### 7.2 - Writing a client for ersid
+
+import sys                                                                       
+
+import treq                                                                      
+                                                                                
+from twisted.internet.task import react
+
+class Client(object): 
+                                                    
+   def __init__(self, url):
+       self.url = url
+       
+   def set(self, key, data):
+       return treq.post("%s/%s" % (self.url, key), data)      
+       
+   def get(self, key):
+       return treq.get("%s/%s" % (self.url, key))
+                                                                                
+def display(response):
+   return treq.text_content(response).addCallback(print)                        
+                                                                        
+def main(reactor, command=None, key=None, value=None):                           
+   if not command and not key:
+       sys.exit("Syntax: set/get key [value]")                                  
+   client = Client("http://localhost:8080")                                     
+   if command == "set":
+       if not value:                                                            
+           sys.exit("Syntax: set/get key [value]")                              
+       return client.set(key, value)                                            
+   else:       
+       return client.get(key).addCallback(display)
+
+if __name__ == "__main__":
+   react(main, sys.argv[1:])
+
+
+
+
+
+##Chapter 8
+
+##Chapter 8 part 1 - implementing geturls.py
+
+Create a file called geturls.py. In it, we'll create a convenience function for running a function in parallel using cooperate. Then we'll use it to implement a limited-concurrency URL fetcher.
+
+from __future__ import print_function
+import sys
+from twisted.internet.task import cooperate, react
+from twisted.internet.defer import gatherResults
+import treq
+
+def parallel_map(function, inputs, parallelism):
+   """
+   Like L{map}, but parallel.
+
+   C{function} must return a Deferred. It will be called in an undefined
+   order with every element of C{inputs}. If parallelism is 5, then at most 5
+   outstanding calls to C{function} will be maintained concurrently.
+   """
+   work = (function(elem) for elem in inputs)
+   tasks = [cooperate(work) for i in xrange(parallelism)]
+   return gatherResults([task.whenDone() for task in tasks])
+
+def getURL(url):
+   print("getting url", url)
+   result = treq.get(url)
+   result.addCallback(treq.text_content)
+   result.addCallback(lambda result: print("got url", url))
+   return result
+
+def main(reactor, *urls):
+   return parallel_map(getURL, urls, 2)
+
+if __name__ == '__main__':
+   react(main, sys.argv[1:])
+
+
+If you run this script as follows, you should see output similar to this:
+
+(twisted-env)$ python geturls.py  http://twistedmatrix.com/ http://slashdot.org/ \
+      http://reddit.com/ http://yahoo.com/ http://google.com/
+getting url http://twistedmatrix.com/
+getting url http://slashdot.org/
+got url http://slashdot.org/
+getting url http://reddit.com/
+got url http://twistedmatrix.com/
+getting url http://yahoo.com/
+got url http://reddit.com/
+getting url http://google.com/
+got url http://google.com/
+got url http://yahoo.com/
+
+You'll notice that since we specified the parallelism as 2, it always maintains two outstanding requests.
+
+###Chapter 8 part 2 - implementing a benchmarking tool
+
+One good use case for concurrency is benchmarking a service. In this lab we'll implement a benchmarking tool for our Ersid system using the cooperate function, and the parallel_map function from the previous lab.
+
+		Oct 8, 2013 - Twisted Python I
+        Lab Guide pg 3
+

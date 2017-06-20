@@ -1,0 +1,16 @@
+#!/media/ubuntu/fe78e82e-1be4-49b2-8e44-0c2126270134/twisted/bin/python
+# Copyright (c) Twisted Matrix Laboratories.
+# See LICENSE for details.
+
+"""
+This script runs GtkManhole, a client for Twisted.Manhole
+"""
+import sys
+
+try:
+    import _preamble
+except ImportError:
+    sys.exc_clear()
+
+from twisted.scripts import manhole
+manhole.run()

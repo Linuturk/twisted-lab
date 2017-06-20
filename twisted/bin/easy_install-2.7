@@ -1,0 +1,10 @@
+#!/media/ubuntu/fe78e82e-1be4-49b2-8e44-0c2126270134/twisted/bin/python
+# EASY-INSTALL-ENTRY-SCRIPT: 'setuptools==1.1.6','console_scripts','easy_install-2.7'
+__requires__ = 'setuptools==1.1.6'
+import sys
+from pkg_resources import load_entry_point
+
+if __name__ == '__main__':
+    sys.exit(
+        load_entry_point('setuptools==1.1.6', 'console_scripts', 'easy_install-2.7')()
+    )
